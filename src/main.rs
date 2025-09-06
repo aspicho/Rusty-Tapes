@@ -1,71 +1,111 @@
-use std::{thread::sleep, time::Duration};
+use std::{sync::{atomic::{self, Ordering}, Arc, Mutex}, thread::sleep, time::Duration};
+use axum::{extract::{ws::WebSocket, State, WebSocketUpgrade}, routing::any, Router};
+use models::TrackInfo;
+use tokio::sync::broadcast;
+use tower_http::cors::{Any, CorsLayer};
+use tracing::{info, warn};
+use futures_util::{sink::SinkExt, stream::{StreamExt, SplitSink, SplitStream}};
 
-#[repr(C)]
-struct TrackInfo {
-    track_name: *const std::os::raw::c_char,
-    artist_name: *const std::os::raw::c_char,
-    progress: f64,
-    duration: f32,
-    genre: *const std::os::raw::c_char,
-    favourited: bool,
-    played_count: i32,
-    album: *const std::os::raw::c_char,
-}
 
-#[link(name = "macos-helper")]
-extern "C" {
-    fn is_music_playing() -> bool;
-    fn get_current_track_info() -> TrackInfo;
-    fn free_track_info(info: *mut TrackInfo);
-}
+mod models;
+mod utils;
 
-fn main() {
-    unsafe {
-        let mut track_info = TrackInfo {
-            track_name: std::ptr::null(),
-            artist_name: std::ptr::null(),
-            progress: 0.0,
-            duration: 0.0,
-            genre: std::ptr::null(),
-            favourited: false,
-            played_count: 0,
-            album: std::ptr::null(),
-        };
+use crate::models::AppState;
 
-        loop {
-            if is_music_playing() {
-                free_track_info(&mut track_info);
+async fn socket_handler(mut socket: WebSocket, state: Arc<AppState>) {
+    let connection_count = state.active_connections.fetch_add(1, Ordering::Relaxed);
+    info!("New client connection. Total: {}", connection_count + 1);
 
-                track_info = get_current_track_info();
-                if !track_info.track_name.is_null() {
-                    let track_name = std::ffi::CStr::from_ptr(track_info.track_name).to_string_lossy();
-                    let artist_name = if !track_info.artist_name.is_null() {
-                        std::ffi::CStr::from_ptr(track_info.artist_name).to_string_lossy()
-                    } else {
-                        "Unknown".into()
-                    };
-                    let genre = if !track_info.genre.is_null() {
-                        std::ffi::CStr::from_ptr(track_info.genre).to_string_lossy()
-                    } else {
-                        "Unknown".into()
-                    };
-                    let album = if !track_info.album.is_null() {
-                        std::ffi::CStr::from_ptr(track_info.album).to_string_lossy()
-                    } else {
-                        "Unknown".into()
-                    };
+    let (sender, receiver) = socket.split();
+    let mut message_receiver = state.client_sender.subscribe();
 
-                    println!("Now playing: {} by {}", track_name, artist_name);
-                    println!("Progress: {:.2} seconds / {:.2} seconds", track_info.progress, track_info.duration);
-                    println!("Genre: {}", genre);
-                    println!("Favourited: {}", track_info.favourited);
-                    println!("Played Count: {}", track_info.played_count);
-                    println!("Album: {}", album);
-                }
-            } else {
-                println!("Music is not currently playing.");
-            }
-            // sleep(Duration::from_secs(1));
+    let state_clone = state.clone();
+    let reader_handle = tokio::spawn(async move {
+        reader_client_task(receiver, state_clone).await;
+    });
+
+    let writer_handle = tokio::spawn(async move {
+        writer_client_task(sender, message_receiver).await;
+    });
+
+    tokio::select! {
+        _ = reader_handle => {
+            info!("Client reader task completed first");
+        }
+        _ = writer_handle => {
+            info!("Client writer task completed first");
         }
     }
+
+    let final_count = state.active_connections.fetch_sub(1, Ordering::Relaxed);
+    info!("Client connection closed. Total: {}", final_count - 1);
+}
+
+async fn reader_client_task(mut receiver: SplitStream<WebSocket>, state: Arc<AppState>) {
+    while let Some(msg) = receiver.next().await {
+        match msg {
+            Ok(msg) => {
+                info!("Received client message: {:?}", msg);
+            }
+            Err(e) => {
+                warn!("Error receiving client message: {:?}", e);
+                break;
+            }
+        }
+    }
+}
+
+async fn writer_client_task(mut sender: SplitSink<WebSocket, axum::extract::ws::Message>, mut message_receiver: broadcast::Receiver<models::TrackInfo>) {
+    while let Ok(chat_message) = message_receiver.recv().await {
+        let msg_text = serde_json::to_string(&chat_message).unwrap_or_else(|_| "{}".to_string());
+        if sender.send(axum::extract::ws::Message::Text(msg_text.into())).await.is_err() {
+            warn!("Error sending client message");
+            break;
+        }
+    }
+}
+
+async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> axum::response::Response {
+    ws.on_upgrade(|socket| socket_handler(socket, state))
+}
+
+#[tokio::main]
+async fn main() {
+    tracing_subscriber::fmt()
+        .with_thread_ids(true)
+        .with_thread_names(true)
+        .init();
+
+    let state = Arc::new(AppState {
+        client_sender: {
+            let (tx, _rx) = tokio::sync::broadcast::channel(100);
+            tx
+        },
+        active_connections: atomic::AtomicUsize::new(0),
+        last_track_info: Mutex::new(None),
+        last_update: Mutex::new(std::time::Instant::now()),
+        is_playing: atomic::AtomicBool::new(false),
+        scrobble_sent: atomic::AtomicBool::new(false),
+
+    });
+
+    utils::listen_for_track(state.clone());
+
+    let app = Router::new()
+        .route("/api/ws", any(ws_handler))
+        .layer(
+            CorsLayer::new()
+                .allow_methods(Any)
+                .allow_headers(Any)
+                .allow_origin(Any),
+        )
+        .with_state(state);
+
+    let args = utils::parse_args();
+
+    info!("Server listening on http://{}:{}", args.host, args.port);
+    let listener = tokio::net::TcpListener::bind((args.host, args.port)).await
+        .expect("Failed to bind TCP listener");
+
+    axum::serve(listener, app).await.unwrap();
 }
