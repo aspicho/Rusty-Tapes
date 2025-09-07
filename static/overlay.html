@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Now Playing - OBS Overlay</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: transparent;
+            overflow: hidden;
+            width: 100vw;
+            height: 100vh;
+        }
+
+        .overlay-container {
+            position: fixed;
+            bottom: 20px;
+            left: 20px;
+            max-width: 180px;
+            background: rgba(0, 0, 0, 0.85);
+            backdrop-filter: blur(10px);
+            border-radius: 12px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            color: white;
+            padding: 16px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+            transition: all 0.3s ease;
+            opacity: 0;
+            transform: translateY(20px);
+        }
+
+        .overlay-container.visible {
+            opacity: 1;
+            transform: translateY(0);
+        }
+
+        .overlay-container.hidden {
+            opacity: 0;
+            transform: translateY(20px);
+            pointer-events: none;
+        }
+
+        .now-playing-header {
+            display: flex;
+            align-items: center;
+            margin-bottom: 12px;
+            font-size: 12px;
+            font-weight: 600;
+            color: rgba(255, 255, 255, 0.7);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .music-icon {
+            margin-right: 6px;
+            font-size: 14px;
+        }
+
+        .track-info {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .track-name {
+            font-size: 16px;
+            font-weight: 600;
+            color: white;
+            line-height: 1.2;
+            position: relative;
+            overflow: hidden;
+            white-space: nowrap;
+            width: 100%;
+        }
+
+        .track-name.scrolling .track-text,
+        .artist-name.scrolling .artist-text,
+        .album-name.scrolling .album-text {
+            display: inline-block;
+            animation: scroll-text 16s linear infinite;
+            white-space: nowrap;
+        }
+
+        .artist-name {
+            font-size: 14px;
+            font-weight: 400;
+            color: rgba(255, 255, 255, 0.8);
+            position: relative;
+            overflow: hidden;
+            white-space: nowrap;
+            width: 100%;
+        }
+
+        .album-name {
+            font-size: 12px;
+            font-weight: 400;
+            color: rgba(255, 255, 255, 0.6);
+            position: relative;
+            overflow: hidden;
+            white-space: nowrap;
+            margin-top: 2px;
+            width: 100%;
+        }
+
+        .progress-container {
+            margin-top: 12px;
+        }
+
+        .progress-bar {
+            width: 100%;
+            height: 3px;
+            background: rgba(255, 255, 255, 0.2);
+            border-radius: 2px;
+            overflow: hidden;
+            margin-bottom: 4px;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #ff6b35, #f7931e);
+            border-radius: 2px;
+            transition: width 0.5s ease;
+            width: 0%;
+        }
+
+        .progress-time {
+            display: flex;
+            justify-content: space-between;
+            font-size: 10px;
+            color: rgba(255, 255, 255, 0.6);
+            font-family: 'SF Mono', Monaco, monospace;
+        }
+
+        .connection-status {
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            font-size: 10px;
+            color: rgba(255, 255, 255, 0.5);
+            background: rgba(0, 0, 0, 0.7);
+            padding: 4px 8px;
+            border-radius: 4px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            transition: opacity 0.3s ease;
+            opacity: 0.3;
+        }
+
+        .status-connected {
+            color: #4CAF50;
+        }
+
+        .status-disconnected {
+            color: #f44336;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        @keyframes fadeOut {
+            from { opacity: 1; transform: translateY(0); }
+            to { opacity: 0; transform: translateY(10px); }
+        }
+
+        .fade-in {
+            animation: fadeIn 0.3s ease forwards;
+        }
+
+        .fade-out {
+            animation: fadeOut 0.3s ease forwards;
+        }
+
+        .overlay-container.fade-in {
+            opacity: 1;
+            transform: translateY(0);
+        }
+
+        .overlay-container.fade-out {
+            opacity: 0;
+            transform: translateY(20px);
+        }
+
+        @keyframes scroll-text {
+            0% { transform: translateX(0); }
+            25% { transform: translateX(0); }
+            75% { transform: translateX(-100%); }
+            100% { transform: translateX(-100%); }
+        }
+
+        @media (max-width: 480px) {
+            .overlay-container {
+                left: 10px;
+                right: auto;
+                bottom: 10px;
+                max-width: 180px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div id="connectionStatus" class="connection-status status-disconnected">
+        ● Disconnected
+    </div>
+
+    <div id="overlayContainer" class="overlay-container hidden">
+        <div class="now-playing-header">
+            <span class="music-icon">🎵</span>
+            Now Playing
+        </div>
+        
+        <div class="track-info">
+            <div id="trackName" class="track-name">
+                <span class="track-text">Track Name</span>
+            </div>
+            <div id="artistName" class="artist-name">
+                <span class="artist-text">Artist Name</span>
+            </div>
+            <div id="albumName" class="album-name">
+                <span class="album-text">Album Name</span>
+            </div>
+        </div>
+
+        <div class="progress-container">
+            <div class="progress-bar">
+                <div id="progressFill" class="progress-fill"></div>
+            </div>
+            <div class="progress-time">
+                <span id="currentTime">0:00</span>
+                <span id="totalTime">0:00</span>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let socket = null;
+        let isConnected = false;
+        let currentTrack = null;
+        let hideTimeout = null;
+        let progressInterval = null;
+        let trackStartTime = null;
+        let isPaused = false;
+        let pausedAt = 0;
+        let connectionStatusTimeout = null;
+        let isOverlayVisible = false;
+
+        const overlayContainer = document.getElementById('overlayContainer');
+        const connectionStatus = document.getElementById('connectionStatus');
+        const trackName = document.getElementById('trackName');
+        const artistName = document.getElementById('artistName');
+        const albumName = document.getElementById('albumName');
+        const progressFill = document.getElementById('progressFill');
+        const currentTime = document.getElementById('currentTime');
+        const totalTime = document.getElementById('totalTime');
+
+        function updateConnectionStatus(connected) {
+            isConnected = connected;
+            connectionStatus.textContent = connected ? '● Connected' : '● Disconnected';
+            connectionStatus.className = `connection-status ${connected ? 'status-connected' : 'status-disconnected'}`;
+            
+            clearTimeout(connectionStatusTimeout);
+            if (connected) {
+                connectionStatus.style.opacity = '0';
+            } else {
+                connectionStatus.style.opacity = '1';
+                connectionStatusTimeout = setTimeout(() => {
+                    connectionStatus.style.opacity = '0.3';
+                }, 3000);
+            }
+        }
+
+        function formatTime(seconds) {
+            if (!seconds || seconds < 0) return '0:00';
+            const mins = Math.floor(seconds / 60);
+            const secs = Math.floor(seconds % 60);
+            return `${mins}:${secs.toString().padStart(2, '0')}`;
+        }
+
+        function showOverlay() {
+            clearTimeout(hideTimeout);
+            overlayContainer.classList.remove('hidden');
+            overlayContainer.classList.add('visible');
+            isOverlayVisible = true;
+        }
+
+        function hideOverlay() {
+            overlayContainer.classList.remove('visible');
+            overlayContainer.classList.add('hidden');
+            isOverlayVisible = false;
+        }
+
+        function scheduleHideOverlay() {
+            clearTimeout(hideTimeout);
+            hideTimeout = setTimeout(() => {
+                hideOverlay();
+            }, 30000);
+        }
+
+        function playTrackChangeAnimation(callback) {
+            // Hide current overlay
+            overlayContainer.classList.add('fade-out');
+            
+            setTimeout(() => {
+                // Update content while hidden
+                if (callback) callback();
+                
+                // Remove fade-out and show with fade-in
+                overlayContainer.classList.remove('fade-out');
+                overlayContainer.classList.add('fade-in');
+                
+                setTimeout(() => {
+                    overlayContainer.classList.remove('fade-in');
+                }, 300);
+            }, 300);
+        }
+
+        function updateProgress() {
+            if (!currentTrack || currentTrack.duration <= 0 || isPaused) {
+                return;
+            }
+
+            const now = Date.now();
+            const elapsed = (now - trackStartTime) / 1000;
+            const currentProgress = pausedAt + elapsed;
+            
+            if (currentProgress <= currentTrack.duration) {
+                const progressPercent = Math.min(100, Math.max(0, (currentProgress / currentTrack.duration) * 100));
+                progressFill.style.width = `${progressPercent}%`;
+                currentTime.textContent = formatTime(currentProgress);
+            } else {
+                // Track ended
+                stopProgressTracking();
+                progressFill.style.width = '100%';
+                currentTime.textContent = formatTime(currentTrack.duration);
+            }
+        }
+
+        function startProgressTracking() {
+            stopProgressTracking();
+            if (currentTrack && currentTrack.duration > 0 && !isPaused) {
+                progressInterval = setInterval(updateProgress, 100); // Update every 100ms for smooth progress
+            }
+        }
+
+        function stopProgressTracking() {
+            if (progressInterval) {
+                clearInterval(progressInterval);
+                progressInterval = null;
+            }
+        }
+
+        function pauseTracking() {
+            if (!isPaused && trackStartTime) {
+                const now = Date.now();
+                pausedAt += (now - trackStartTime) / 1000;
+            }
+            isPaused = true;
+            stopProgressTracking();
+        }
+
+        function resumeTracking() {
+            if (isPaused) {
+                trackStartTime = Date.now();
+                isPaused = false;
+                startProgressTracking();
+            }
+        }
+
+        function updateTrackDisplay(trackData) {
+            // Check for pause signal (negative duration)
+            if (trackData.duration < 0) {
+                pauseTracking();
+                return;
+            }
+
+            const isNewTrack = !currentTrack || 
+                currentTrack.track_name !== trackData.track_name || 
+                currentTrack.artist_name !== trackData.artist_name;
+
+            const wasVisible = isOverlayVisible;
+
+            if (isNewTrack && wasVisible) {
+                // Play animation sequence for track change
+                playTrackChangeAnimation(() => {
+                    updateTrackContent(trackData);
+                });
+            } else {
+                // Normal update without animation
+                updateTrackContent(trackData);
+                
+                // Show overlay and schedule hide
+                showOverlay();
+                scheduleHideOverlay();
+            }
+        }
+
+        function checkTextOverflow(element, textElement) {
+            // Reset
+            element.classList.remove('scrolling');
+            
+            // Force immediate check
+            const container = element.getBoundingClientRect().width;
+            const text = textElement.getBoundingClientRect().width;
+            
+            console.log(`${element.id}: container=${container}, text=${text}`);
+            
+            if (text > container) {
+                element.classList.add('scrolling');
+                console.log(`SCROLLING: ${element.id}`);
+            }
+        }
+
+        function updateTrackContent(trackData) {
+            const isNewTrack = !currentTrack || 
+                currentTrack.track_name !== trackData.track_name || 
+                currentTrack.artist_name !== trackData.artist_name;
+
+            currentTrack = trackData;
+            
+            if (isNewTrack) {
+                // New track - reset everything
+                trackStartTime = Date.now();
+                pausedAt = trackData.progress || 0;
+                isPaused = false;
+                
+                // Update track information
+                const trackTextSpan = trackName.querySelector('.track-text');
+                const artistTextSpan = artistName.querySelector('.artist-text');
+                const albumTextSpan = albumName.querySelector('.album-text');
+                
+                trackTextSpan.textContent = trackData.track_name || 'Unknown Track';
+                artistTextSpan.textContent = trackData.artist_name || 'Unknown Artist';
+                albumTextSpan.textContent = trackData.album || 'Unknown Album';
+                totalTime.textContent = formatTime(trackData.duration);
+                
+                // Remove all scrolling
+                trackName.classList.remove('scrolling');
+                artistName.classList.remove('scrolling');
+                albumName.classList.remove('scrolling');
+                
+                // Force immediate scrolling check
+                setTimeout(() => {
+                    checkTextOverflow(trackName, trackTextSpan);
+                    checkTextOverflow(artistName, artistTextSpan);
+                    checkTextOverflow(albumName, albumTextSpan);
+                }, 100);
+            } else {
+                // Same track - resume if it was paused
+                if (isPaused) {
+                    resumeTracking();
+                }
+            }
+
+            // Update initial progress
+            if (trackData.duration > 0) {
+                const progressPercent = Math.min(100, Math.max(0, (pausedAt / trackData.duration) * 100));
+                progressFill.style.width = `${progressPercent}%`;
+                currentTime.textContent = formatTime(pausedAt);
+                startProgressTracking();
+            } else {
+                progressFill.style.width = '0%';
+                currentTime.textContent = '0:00';
+                stopProgressTracking();
+            }
+            
+            // Show overlay and schedule hide (only if not in animation)
+            if (!isOverlayVisible) {
+                showOverlay();
+            }
+            scheduleHideOverlay();
+        }
+
+        function connect() {
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                return;
+            }
+
+            console.log('Connecting to WebSocket...');
+            socket = new WebSocket('ws://127.0.0.1:7271/api/ws');
+
+            socket.onopen = function(event) {
+                console.log('Connected to WebSocket');
+                updateConnectionStatus(true);
+            };
+
+            socket.onmessage = function(event) {
+                try {
+                    const trackData = JSON.parse(event.data);
+                    console.log('Received track data:', trackData);
+                    updateTrackDisplay(trackData);
+                } catch (e) {
+                    console.error('Error parsing message:', e);
+                }
+            };
+
+            socket.onclose = function(event) {
+                console.log('WebSocket closed, code:', event.code);
+                updateConnectionStatus(false);
+                
+                // Auto-reconnect after 3 seconds
+                setTimeout(() => {
+                    if (!isConnected) {
+                        connect();
+                    }
+                }, 3000);
+            };
+
+            socket.onerror = function(error) {
+                console.error('WebSocket error:', error);
+                updateConnectionStatus(false);
+            };
+        }
+
+        function disconnect() {
+            if (socket) {
+                socket.close();
+                socket = null;
+            }
+            stopProgressTracking();
+        }
+
+        // Auto-connect on page load
+        window.addEventListener('load', () => {
+            // Initially hide connection status
+            connectionStatus.style.opacity = '0.3';
+            connect();
+        });
+
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', disconnect);
+
+        // Auto-reconnect logic
+        setInterval(() => {
+            if (!isConnected || !socket || socket.readyState !== WebSocket.OPEN) {
+                connect();
+            }
+        }, 5000);
+
+        // Hide overlay when clicking on it (useful for testing)
+        overlayContainer.addEventListener('click', () => {
+            hideOverlay();
+            clearTimeout(hideTimeout);
+            stopProgressTracking();
+        });
+    </script>
+</body>
+</html>
