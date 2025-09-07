@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Now Playing - Scrolling Overlay</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: transparent;
+            overflow: hidden;
+            width: 600px;
+            height: 80px;
+        }
+
+        .scroll-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 600px;
+            height: 80px;
+            color: white;
+            display: flex;
+            align-items: center;
+            overflow: hidden;
+            opacity: 0;
+            transition: opacity 0.5s ease;
+        }
+
+        .scroll-overlay.visible {
+            opacity: 1;
+        }
+
+        .scroll-overlay.hidden {
+            opacity: 0;
+        }
+
+        .scroll-container {
+            width: 100%;
+            height: 100%;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .scroll-content {
+            position: absolute;
+            white-space: nowrap;
+            font-size: 28px;
+            font-weight: 500;
+            line-height: 80px;
+            color: white;
+            will-change: transform;
+        }
+
+        .scroll-content.paused {
+            animation-play-state: paused;
+        }
+
+        .connection-status {
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            font-size: 10px;
+            color: rgba(255, 255, 255, 0.5);
+            background: rgba(0, 0, 0, 0.7);
+            padding: 4px 8px;
+            border-radius: 4px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            transition: opacity 0.3s ease;
+            opacity: 0.3;
+        }
+
+        .status-connected {
+            color: #4CAF50;
+        }
+
+        .status-disconnected {
+            color: #f44336;
+        }
+    </style>
+</head>
+<body>
+    <div id="connectionStatus" class="connection-status status-disconnected">
+        ● Disconnected
+    </div>
+
+    <div id="scrollOverlay" class="scroll-overlay hidden">
+        <div class="scroll-container">
+            <div id="scrollContent" class="scroll-content"></div>
+        </div>
+    </div>
+
+    <script>
+        let socket = null;
+        let isConnected = false;
+        let currentTrack = null;
+        let connectionStatusTimeout = null;
+        let isOverlayVisible = false;
+        let showTimeout = null;
+        let trackStartTime = null;
+
+        const scrollOverlay = document.getElementById('scrollOverlay');
+        const connectionStatus = document.getElementById('connectionStatus');
+        const scrollContent = document.getElementById('scrollContent');
+
+        function updateConnectionStatus(connected) {
+            isConnected = connected;
+            connectionStatus.textContent = connected ? '● Connected' : '● Disconnected';
+            connectionStatus.className = `connection-status ${connected ? 'status-connected' : 'status-disconnected'}`;
+            
+            clearTimeout(connectionStatusTimeout);
+            if (connected) {
+                connectionStatus.style.opacity = '0';
+            } else {
+                connectionStatus.style.opacity = '1';
+                connectionStatusTimeout = setTimeout(() => {
+                    connectionStatus.style.opacity = '0.3';
+                }, 3000);
+            }
+        }
+
+        function showOverlay() {
+            scrollOverlay.classList.remove('hidden');
+            scrollOverlay.classList.add('visible');
+            isOverlayVisible = true;
+            
+            const text = scrollContent.textContent;
+            
+            // Create continuous scrolling text with proper spacing
+            const repeatedText = `${text}     ${text}     ${text}     ${text}     `;
+            scrollContent.textContent = repeatedText;
+            
+            // Calculate text width for proper animation
+            const tempDiv = document.createElement('div');
+            tempDiv.style.position = 'absolute';
+            tempDiv.style.visibility = 'hidden';
+            tempDiv.style.fontSize = '28px';
+            tempDiv.style.fontWeight = '500';
+            tempDiv.style.whiteSpace = 'nowrap';
+            tempDiv.textContent = text + '     ';
+            document.body.appendChild(tempDiv);
+            const singleTextWidth = tempDiv.offsetWidth;
+            document.body.removeChild(tempDiv);
+            
+            // Calculate animation duration based on text width
+            const speed = 40; // pixels per second
+            const duration = singleTextWidth / speed;
+            
+            // Create and inject keyframes
+            const keyframeName = 'continuousScroll';
+            const existingStyle = document.getElementById('dynamicKeyframes');
+            if (existingStyle) {
+                existingStyle.remove();
+            }
+            
+            const style = document.createElement('style');
+            style.id = 'dynamicKeyframes';
+            style.textContent = `
+                @keyframes ${keyframeName} {
+                    0% { transform: translateX(0); }
+                    100% { transform: translateX(-${singleTextWidth}px); }
+                }
+            `;
+            document.head.appendChild(style);
+            
+            // Reset and start animation
+            scrollContent.style.animation = 'none';
+            scrollContent.offsetHeight; // Force reflow
+            scrollContent.style.animation = `${keyframeName} ${duration}s linear infinite`;
+        }
+
+        function hideOverlay() {
+            scrollOverlay.classList.remove('visible');
+            scrollOverlay.classList.add('hidden');
+            isOverlayVisible = false;
+        }
+
+        function scheduleShowOverlay() {
+            clearTimeout(showTimeout);
+            showTimeout = setTimeout(() => {
+                if (currentTrack) {
+                    showOverlay();
+                }
+            }, 30000); // 30 seconds delay
+        }
+
+        function updateTrackDisplay(trackData) {
+            // Check for pause signal (negative duration)
+            if (trackData.duration < 0) {
+                scrollContent.classList.add('paused');
+                return;
+            }
+
+            const isNewTrack = !currentTrack || 
+                currentTrack.track_name !== trackData.track_name || 
+                currentTrack.artist_name !== trackData.artist_name;
+
+            currentTrack = trackData;
+            trackStartTime = Date.now();
+            
+            // Format: Track Name - Album - Artist
+            const displayText = `${trackData.track_name || 'Unknown Track'} - ${trackData.album || 'Unknown Album'} - ${trackData.artist_name || 'Unknown Artist'} |`;
+            scrollContent.textContent = displayText;
+            
+            // Remove paused state
+            scrollContent.classList.remove('paused');
+            
+            if (isNewTrack) {
+                hideOverlay();
+                scheduleShowOverlay();
+            } else if (isOverlayVisible) {
+                // Update running overlay
+                showOverlay();
+            }
+        }
+
+        function connect() {
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                return;
+            }
+
+            console.log('Connecting to WebSocket...');
+            socket = new WebSocket('ws://127.0.0.1:7271/api/ws');
+
+            socket.onopen = function(event) {
+                console.log('Connected to WebSocket');
+                updateConnectionStatus(true);
+            };
+
+            socket.onmessage = function(event) {
+                try {
+                    const trackData = JSON.parse(event.data);
+                    console.log('Received track data:', trackData);
+                    updateTrackDisplay(trackData);
+                } catch (e) {
+                    console.error('Error parsing message:', e);
+                }
+            };
+
+            socket.onclose = function(event) {
+                console.log('WebSocket closed, code:', event.code);
+                updateConnectionStatus(false);
+                
+                // Auto-reconnect after 3 seconds
+                setTimeout(() => {
+                    if (!isConnected) {
+                        connect();
+                    }
+                }, 3000);
+            };
+
+            socket.onerror = function(error) {
+                console.error('WebSocket error:', error);
+                updateConnectionStatus(false);
+            };
+        }
+
+        function disconnect() {
+            if (socket) {
+                socket.close();
+                socket = null;
+            }
+            clearTimeout(showTimeout);
+        }
+
+        // Auto-connect on page load
+        window.addEventListener('load', () => {
+            connectionStatus.style.opacity = '0.3';
+            connect();
+        });
+
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', disconnect);
+
+        // Auto-reconnect logic
+        setInterval(() => {
+            if (!isConnected || !socket || socket.readyState !== WebSocket.OPEN) {
+                connect();
+            }
+        }, 5000);
+
+        // Hide overlay when clicking on it
+        scrollOverlay.addEventListener('click', () => {
+            hideOverlay();
+            clearTimeout(showTimeout);
+        });
+    </script>
+</body>
+</html>

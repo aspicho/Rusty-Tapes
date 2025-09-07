@@ -32,8 +32,14 @@ pub fn listen_for_track(state: Arc<AppState>) {
                 album: std::ptr::null(),
             };
 
+            let mut last_track_identifier: Option<String> = None;
+            let mut was_playing = false;
+
             loop {
-                if is_music_playing() {
+                let is_currently_playing = is_music_playing();
+                let play_state_changed = was_playing != is_currently_playing;
+                
+                if is_currently_playing {
                     free_track_info(&mut track_info);
                     track_info = get_current_track_info();
                     
@@ -55,66 +61,78 @@ pub fn listen_for_track(state: Arc<AppState>) {
                             "Unknown".into()
                         };
 
-                        if let Some(last_info) = &*state_clone.last_track_info.lock().unwrap() {
-                            if last_info.track_name == track_name && last_info.artist_name == artist_name {
-                                sleep(Duration::from_secs(1));
-                                continue;
+                        let track_identifier = format!("{}|{}", track_name, artist_name);
+                        let track_changed = last_track_identifier.as_ref() != Some(&track_identifier);
+
+                        if track_changed || play_state_changed {
+                            let new_track = TrackInfo {
+                                track_name: track_name.to_string(),
+                                artist_name: artist_name.to_string(),
+                                progress: track_info.progress,
+                                duration: track_info.duration,
+                                genre: genre.to_string(),
+                                favourited: track_info.favourited,
+                                played_count: track_info.played_count,
+                                album: album.to_string(),
+                            };
+
+                            {
+                                let mut last_info = state_clone.last_track_info.lock().unwrap();
+                                *last_info = Some(new_track.clone());
                             }
+
+                            *state_clone.last_update.lock().unwrap() = std::time::Instant::now();
+                            state_clone.is_playing.store(true, Ordering::SeqCst);
+                            
+                            if track_changed {
+                                state_clone.scrobble_sent.store(false, Ordering::SeqCst);
+                                last_track_identifier = Some(track_identifier);
+                            }
+
+                            let _ = state_clone.client_sender.send(new_track);
                         }
-
-                        let new_track = TrackInfo {
-                            track_name: track_name.to_string(),
-                            artist_name: artist_name.to_string(),
-                            progress: track_info.progress,
-                            duration: track_info.duration,
-                            genre: genre.to_string(),
-                            favourited: track_info.favourited,
-                            played_count: track_info.played_count,
-                            album: album.to_string(),
-                        };
-
-                        {
-                            let mut last_info = state_clone.last_track_info.lock().unwrap();
-                            *last_info = Some(new_track.clone());
-                        }
-
-                        *state_clone.last_update.lock().unwrap() = std::time::Instant::now();
-                        state_clone.is_playing.store(true, Ordering::SeqCst);
-                        state_clone.scrobble_sent.store(false, Ordering::SeqCst);
-
-                        let _ = state_clone.client_sender.send(new_track);
                     } else {
-                        if let Some(last_info) = &*state_clone.last_track_info.lock().unwrap() {
-                            if last_info.track_name == "Radio/Mix" && last_info.artist_name == "Unknown" {
-                                sleep(Duration::from_secs(1));
-                                continue;
-                            }
-                        }
+                        let track_identifier = "Radio/Mix|Unknown".to_string();
+                        let track_changed = last_track_identifier.as_ref() != Some(&track_identifier);
 
-                        info!("Current track name is null. Most likely radio or mix is playing.");
-                        
-                        let net_track = TrackInfo {
-                            track_name: "Radio/Mix".to_string(),
-                            artist_name: "Unknown".to_string(),
-                            progress: 0.0,
-                            duration: 0.0,
-                            genre: "Unknown".to_string(),
-                            favourited: false,
-                            played_count: 0,
-                            album: "Unknown".to_string(),
-                        };
-                        
-                        {
-                            let mut last_info = state_clone.last_track_info.lock().unwrap();
-                            *last_info = Some(net_track.clone());
+                        if track_changed || play_state_changed {
+                            info!("Current track name is null. Most likely radio or mix is playing.");
+                            
+                            let net_track = TrackInfo {
+                                track_name: "Radio/Mix".to_string(),
+                                artist_name: "Unknown".to_string(),
+                                progress: 0.0,
+                                duration: 0.0,
+                                genre: "Unknown".to_string(),
+                                favourited: false,
+                                played_count: 0,
+                                album: "Unknown".to_string(),
+                            };
+                            
+                            {
+                                let mut last_info = state_clone.last_track_info.lock().unwrap();
+                                *last_info = Some(net_track.clone());
+                            }
+                            
+                            *state_clone.last_update.lock().unwrap() = std::time::Instant::now();
+                            state_clone.is_playing.store(true, Ordering::SeqCst);
+                            let _ = state_clone.client_sender.send(net_track);
+                            last_track_identifier = Some(track_identifier);
                         }
-                        
-                        *state_clone.last_update.lock().unwrap() = std::time::Instant::now();
-                        state_clone.is_playing.store(true, Ordering::SeqCst);
-                        let _ = state_clone.client_sender.send(net_track);
+                    }
+                } else if play_state_changed {
+                    state_clone.is_playing.store(false, Ordering::SeqCst);
+                    if let Some(last_info) = &*state_clone.last_track_info.lock().unwrap() {
+                        let pause_track = TrackInfo {
+                            progress: 0.0,
+                            duration: -1.0,
+                            ..last_info.clone()
+                        };
+                        let _ = state_clone.client_sender.send(pause_track);
                     }
                 }
 
+                was_playing = is_currently_playing;
                 sleep(Duration::from_secs(1));
             }
         }

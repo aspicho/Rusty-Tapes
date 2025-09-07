@@ -1,5 +1,5 @@
-use std::{sync::{atomic::{self, Ordering}, Arc, Mutex}, thread::sleep, time::Duration};
-use axum::{extract::{ws::WebSocket, State, WebSocketUpgrade}, routing::any, Router};
+use std::{sync::{atomic::{self, Ordering}, Arc, Mutex}};
+use axum::{body::Body, extract::{ws::WebSocket, State, WebSocketUpgrade}, http::StatusCode, response::Response, routing::any, Json, Router};
 use tokio::sync::broadcast;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::{info, warn};
@@ -67,6 +67,29 @@ async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) ->
     ws.on_upgrade(|socket| socket_handler(socket, state))
 }
 
+async fn is_playing_check(State(state): State<Arc<AppState>>,) -> (StatusCode, Json<serde_json::Value>) {
+    let is_playing = state.is_playing.load(Ordering::Relaxed);
+    let response = serde_json::json!({ "is_playing": is_playing });
+    (StatusCode::OK, Json(response))
+}
+
+async fn get_last_track(State(state): State<Arc<AppState>>) -> (StatusCode, Json<serde_json::Value>) {
+    let last_track = state.last_track_info.lock().unwrap();
+    let response = match &*last_track {
+        Some(track) => serde_json::json!({
+            "track": track,
+        }),
+        None => serde_json::json!({ "track": null }),
+    };
+    (StatusCode::OK, Json(response))
+}
+
+async fn last_update(State(state): State<Arc<AppState>>,) -> (StatusCode, Json<serde_json::Value>) {
+    let last_update = state.last_update.lock().unwrap();
+    let response = serde_json::json!({ "last_update": last_update.elapsed().as_secs() });
+    (StatusCode::OK, Json(response))
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
@@ -95,6 +118,23 @@ async fn main() {
 
     let app = Router::new()
         .route("/api/ws", any(ws_handler))
+        .route("/api/is_playing", any(is_playing_check))
+        .route("/api/last_track", any(get_last_track))
+        .route("/api/last_update", any(last_update))
+        .route("/overlay", any(|| async {
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("Content-Type", "text/html")
+                .body(Body::from(include_str!("../static/overlay.html")))
+                .unwrap()
+        }))
+        .route("/overlay-scroll", any(|| async {
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("Content-Type", "text/html")
+                .body(Body::from(include_str!("../static/overlay-scroll.html")))
+                .unwrap()
+        }))
         .layer(
             CorsLayer::new()
                 .allow_methods(Any)
