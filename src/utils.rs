@@ -188,7 +188,9 @@ pub fn discord_rpc_task(state: Arc<AppState>, client_id: &str) {
                 "state": format!("by {}", track.artist_name),
                 "assets": {
                     "large_image": image_url.unwrap_or_else(|| "image_logo".to_string()),
-                    "large_text": "Apple Music",
+                    "large_text": format!("Apple Music{}{}", 
+                        if track.genre != "Unknown" { format!(" - {}", track.genre) } else { "".to_string() }, 
+                        if track.played_count > 0 { format!(" (Played {} times)", track.played_count) } else { "".to_string() }),
                     "small_image": if track.favourited { "favourite" } else { "unfavourite" },
                     "small_text": if track.favourited { "Favourited" } else { "Not Favourited" },
                 },
