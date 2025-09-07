@@ -1,11 +1,9 @@
 use std::{sync::{atomic::{self, Ordering}, Arc, Mutex}, thread::sleep, time::Duration};
 use axum::{extract::{ws::WebSocket, State, WebSocketUpgrade}, routing::any, Router};
-use models::TrackInfo;
 use tokio::sync::broadcast;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::{info, warn};
 use futures_util::{sink::SinkExt, stream::{StreamExt, SplitSink, SplitStream}};
-
 
 mod models;
 mod utils;
@@ -76,6 +74,8 @@ async fn main() {
         .with_thread_names(true)
         .init();
 
+    const CLIENT_ID: &str = "1400478980259315843";
+
     let state = Arc::new(AppState {
         client_sender: {
             let (tx, _rx) = tokio::sync::broadcast::channel(100);
@@ -90,6 +90,8 @@ async fn main() {
     });
 
     utils::listen_for_track(state.clone());
+
+    utils::discord_rpc_task(state.clone(), CLIENT_ID);
 
     let app = Router::new()
         .route("/api/ws", any(ws_handler))
